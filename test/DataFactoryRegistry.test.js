@@ -4,7 +4,8 @@ const DataStoreContract = artifacts.require('DataStore');
 const HaraToken = artifacts.require('HaraTokenPrivate');
 
 const expectRevert = require("./helpers/expectRevert");
-const encoderDecoder = require("./helpers/encoderDecoder")
+const encoderDecoder = require("./helpers/encoderDecoder");
+const logsDetail = require("./helpers/LogsHelper");
 
 contract('DataFactoryRegistry', accounts => {
   let datafactoryregistry;
@@ -24,29 +25,17 @@ contract('DataFactoryRegistry', accounts => {
   const notOwner = accounts[2];
   const owner = accounts[3]; // hart owner
   const otherDataOwner1 = accounts[4];
+  const allowedAddress1 = accounts[5];
+  const allowedAddress2 = accounts[6];
 
-  const DataCreationLogTopic = "0xba4eef7a56e3b8bee912b9f8f83435cf9021729f21d02a5abc46aa90e0940305";
-  const DataCreationLogAbi = [{
-    "indexed": false,
-    "name": "contractDataAddress",
-    "type": "address"
-  }, {
-    "indexed": false,
-    "name": "owner",
-    "type": "address"
-  }, {
-    "indexed": false,
-    "name": "location",
-    "type": "address"
-  }, {
-    "indexed": false,
-    "name": "signature",
-    "type": "bytes"
-  }, {
-    "indexed": false,
-    "name": "signatureFunc",
-    "type": "bytes"
-  }];
+  const DataCreationLogTopic = logsDetail.DataFactory.DataCreationLogTopic;
+  const DataCreationLogAbi = logsDetail.DataFactory.DataCreationLogAbi;
+
+  const DataFactoryAddressChangedLogTopic = logsDetail.DataFactoryRegistry.DataFactoryAddressChangedLogTopic;
+  const DataFactoryAddressChangedLogAbi = logsDetail.DataFactoryRegistry.DataFactoryAddressChangedLogAbi;
+
+  const AllowedAddressLogTopic = logsDetail.DataFactoryRegistry.AllowedAddressLogTopic;
+  const AllowedAddressLogAbi = logsDetail.DataFactoryRegistry.AllowedAddressLogAbi;
 
   before(async function () {
     // deploy hara token contract
@@ -57,7 +46,7 @@ contract('DataFactoryRegistry', accounts => {
       from: owner,
       gas: 4700000
     });
-    initHartAddress = hart.addrress;
+    initHartAddress = hart.options.address;
 
     await hart.methods.mint(owner, web3.utils.toWei("1000")).send({
       from: owner
@@ -94,17 +83,94 @@ contract('DataFactoryRegistry', accounts => {
     assert.strictEqual(percent.toString(), datafactory.address);
   });
 
+  describe('add allowed address to restrict store data only for registered data ', async function () {
+    it('can\'t store data ifdata provider not set', async function () {
+      await expectRevert(
+        datafactoryregistry.storeData(
+          dataOwner,
+          initLocation,
+          web3.utils.asciiToHex(initSignature),
+          web3.utils.asciiToHex(initSignatureFunc), {
+            from: dataOwner
+          }
+        )
+      );
+    });
+
+    it('add allowed address to store data by owner', async function () {
+      var receipt = await datafactoryregistry.addAllowedAddress(allowedAddress1, {
+        from: factoryRegistryOwner
+      });
+
+      const logs = receipt.receipt.rawLogs
+      const log = encoderDecoder.decodeLogsByTopic(AllowedAddressLogTopic, AllowedAddressLogAbi, logs)[0];
+      assert.strictEqual(log.who, allowedAddress1);
+      assert.strictEqual(log.isAllowed, true);
+      assert.strictEqual(log.by, factoryRegistryOwner);
+
+      var addressIsAllowed = await datafactoryregistry.allowedAddressToStore(allowedAddress1);
+      assert.strictEqual(addressIsAllowed, true);
+      assert.notEqual(addressIsAllowed, false);
+    });
+
+    it('can not add allowed address to store data by not owner', async function () {
+      await expectRevert(
+        datafactoryregistry.addAllowedAddress(allowedAddress2, {
+          from: notOwner
+        }));
+
+      var addressIsAllowed = await datafactoryregistry.allowedAddressToStore(allowedAddress2);
+      assert.strictEqual(addressIsAllowed, false);
+      assert.notEqual(addressIsAllowed, true);
+    });
+
+    it('can not remove allowed address to store data by not owner', async function () {
+      await expectRevert(
+        datafactoryregistry.removeAllowedAddress(allowedAddress1, {
+          from: notOwner
+        }));
+
+      var addressIsAllowed = await datafactoryregistry.allowedAddressToStore(allowedAddress1);
+      assert.strictEqual(addressIsAllowed, true);
+      assert.notEqual(addressIsAllowed, false);
+    });
+
+    it('remove allowed address to store data by owner', async function () {
+      var receipt = await datafactoryregistry.removeAllowedAddress(allowedAddress1, {
+        from: factoryRegistryOwner
+      });
+
+      const logs = receipt.receipt.rawLogs
+      const log = encoderDecoder.decodeLogsByTopic(AllowedAddressLogTopic, AllowedAddressLogAbi, logs)[0];
+      assert.strictEqual(log.who, allowedAddress1);
+      assert.strictEqual(log.isAllowed, false);
+      assert.strictEqual(log.by, factoryRegistryOwner);
+
+      var addressIsAllowed = await datafactoryregistry.allowedAddressToStore(allowedAddress1);
+      assert.strictEqual(addressIsAllowed, false);
+      assert.notEqual(addressIsAllowed, true);
+
+    });
+
+
+  });
+
   describe('create data store contract with signature function', async function () {
     before(async function () {
+      // add allowed address 
+      await datafactoryregistry.addAllowedAddress(allowedAddress1, {
+        from: factoryRegistryOwner
+      });
+
       var receipt = await datafactoryregistry.storeData(
         dataOwner,
         initLocation,
         web3.utils.asciiToHex(initSignature),
         web3.utils.asciiToHex(initSignatureFunc), {
-          from: dataOwner
+          from: allowedAddress1
         }
       );
-      const logs = receipt.receipt.logs
+      const logs = receipt.receipt.rawLogs
       const DataCreationLog = encoderDecoder.decodeLogsByTopic(DataCreationLogTopic, DataCreationLogAbi, logs)[0];
       datastore1 = await DataStoreContract.at(DataCreationLog.contractDataAddress);
     });
@@ -122,31 +188,31 @@ contract('DataFactoryRegistry', accounts => {
     });
 
     it('store data location', async function () {
-      var dataLocation = await datastore1.location();
+      var dataLocation = await datastore1.getLocation();
       assert.strictEqual(dataLocation, initLocation);
     });
 
     it('store data signature', async function () {
-      var dataSignature = await datastore1.signature();
+      var dataSignature = await datastore1.getSignature();
       assert.strictEqual(web3.utils.hexToAscii(dataSignature), initSignature);
     });
 
     it('store data signature function', async function () {
-      var dataSignatureFunc = await datastore1.signatureFunc();
+      var dataSignatureFunc = await datastore1.getSignatureFunction();
       assert.strictEqual(web3.utils.hexToAscii(dataSignatureFunc), initSignatureFunc);
     });
   });
 
   describe('create data store contract without signature function', async function () {
     before(async function () {
-      var receipt = await datafactoryregistry.storeData(
+      var receipt = await datafactoryregistry.storeData2(
         otherDataOwner1,
         initLocation,
         web3.utils.asciiToHex(initSignature), {
-          from: otherDataOwner1
+          from: allowedAddress1
         }
       );
-      const logs = receipt.receipt.logs
+      const logs = receipt.receipt.rawLogs
       const DataCreationLog = encoderDecoder.decodeLogsByTopic(DataCreationLogTopic, DataCreationLogAbi, logs)[0];
       datastore2 = await DataStoreContract.at(DataCreationLog.contractDataAddress);
     });
@@ -164,17 +230,17 @@ contract('DataFactoryRegistry', accounts => {
     });
 
     it('store data location', async function () {
-      var dataLocation = await datastore2.location();
+      var dataLocation = await datastore2.getLocation();
       assert.strictEqual(dataLocation, initLocation);
     });
 
     it('store data signature', async function () {
-      var dataSignature = await datastore2.signature();
+      var dataSignature = await datastore2.getSignature();
       assert.strictEqual(web3.utils.hexToAscii(dataSignature), initSignature);
     });
 
     it('store data signature function', async function () {
-      var dataSignatureFunc = await datastore2.signatureFunc();
+      var dataSignatureFunc = await datastore2.getSignatureFunction();
       assert.strictEqual(web3.utils.hexToAscii(dataSignatureFunc), initSignatureFunc);
     });
   });
@@ -228,7 +294,7 @@ contract('DataFactoryRegistry', accounts => {
 
       var log = changedReciept.logs[0];
       assert.strictEqual(log.event, "PercentageChanged");
-      assert.strictEqual(log.args.who, "Hara");
+      assert.strictEqual(log.args.who.toString(), "0");
       assert.strictEqual(log.args.oldPercentage.toString(), "15");
       assert.strictEqual(log.args.newPercentage.toString(), "10");
     });
@@ -242,7 +308,7 @@ contract('DataFactoryRegistry', accounts => {
 
       var log = changedReciept.logs[0];
       assert.strictEqual(log.event, "PercentageChanged");
-      assert.strictEqual(log.args.who, "DataProvider");
+      assert.strictEqual(log.args.who.toString(), "1");
       assert.strictEqual(log.args.oldPercentage.toString(), "5");
       assert.strictEqual(log.args.newPercentage.toString(), "10");
     });
@@ -296,24 +362,6 @@ contract('DataFactoryRegistry', accounts => {
   });
   describe('change data factory address on registry contract', async function () {
     let dataFactoryNew;
-    const logTopic = "0xe9192a628b2c8c954d2affbd49e739e2a839c14cd11ee4d9484481e56410be5a";
-    const logInputAbi = [
-			{
-				"indexed": false,
-				"name": "who",
-				"type": "address"
-			},
-			{
-				"indexed": false,
-				"name": "oldAddress",
-				"type": "address"
-			},
-			{
-				"indexed": false,
-				"name": "newAddress",
-				"type": "address"
-			}
-		];
 
     before(async function () {
       dataFactoryNew = await DataFactoryContract.new(
@@ -325,9 +373,8 @@ contract('DataFactoryRegistry', accounts => {
       var receipt = await datafactoryregistry.setDataFactoryAddress(dataFactoryNew.address, {
         from: factoryOwner
       });
-      const logs = receipt.receipt.logs;
-      const log = encoderDecoder.decodeLogsByTopic(logTopic, logInputAbi, logs)[0];
-      
+      const logs = receipt.receipt.rawLogs;
+      const log = encoderDecoder.decodeLogsByTopic(DataFactoryAddressChangedLogTopic, DataFactoryAddressChangedLogAbi, logs)[0];
       assert.strictEqual(logs.length, 1)
       assert.strictEqual(log.who, factoryOwner);
       assert.strictEqual(log.oldAddress, datafactory.address);
